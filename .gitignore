@@ -1,0 +1,24 @@
+# Unreal Engine generated data
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE and local tooling
+.vs/
+.vscode/
+*.sln
+*.VC.db
+*.VC.opendb
+
+# Python environments, caches, and experiment outputs
+.venv/
+__pycache__/
+*.py[cod]
+Research/**/output/
+Research/**/checkpoints/
+Research/**/runs/
+
+# OS files
+.DS_Store
+Thumbs.db
