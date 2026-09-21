@@ -18,6 +18,11 @@ __pycache__/
 Research/**/output/
 Research/**/checkpoints/
 Research/**/runs/
+Research/m0_float_latent_baseline/data/
+
+# Third-party reference checkouts (see Research/README.md)
+Research/TextureSetNeuralCompressionSample/
+Research/neural-compression-textures/
 
 # OS files
 .DS_Store

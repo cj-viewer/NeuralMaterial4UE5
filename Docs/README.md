@@ -6,6 +6,7 @@
 
 - `2311.16121v2.pdf` — Weinreich et al., *Real-Time Neural Materials using Block-Compressed Features* (Ubisoft BCF direction).
 - `2506.06040v1.pdf` — Belcour & Benyoub, *Hardware Accelerated Neural Block Texture Compression with Cooperative Vectors* (BCF1 training direction).
+- `2407.09543v3.pdf` — Fujieda & Harada (AMD), *Neural Texture Block Compression* (differentiable BC1 texture unit in PyTorch with STE; reference for the M1 quantization-aware training step).
 - [Ubisoft La Forge: Shipping Neural Texture Compression in Assassin's Creed Mirage](https://www.ubisoft.com/en-us/studio/laforge/news/415slmB3ZGzv8d2LhO9QT/shipping-neural-texture-compression-in-assassins-creed-mirage) — production implementation reference.
 
 Key initial decisions:
