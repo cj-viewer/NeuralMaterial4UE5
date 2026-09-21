@@ -31,6 +31,32 @@ def kib(bpp: float) -> float:
     return bpp / 8.0 * SOURCE_RES * SOURCE_RES / 1024.0
 
 
+def bc_chain_bytes(res: int, bytes_per_block: int = 8) -> int:
+    """Block-compressed texture with a full mip chain down to 4x4 (partial
+    blocks via ceil for non-pow2 levels)."""
+    total, r = 0, res
+    while r >= 4:
+        blocks = -(-r // 4)
+        total += blocks * blocks * bytes_per_block
+        r //= 2
+    return total
+
+
+def raw_chain_bytes(res: int, bytes_per_texel: int) -> int:
+    total, r = 0, res
+    while r >= 1:
+        total += r * r * bytes_per_texel
+        r //= 2
+    return total
+
+
+MLP_BYTES = MLP_PARAM_COUNT * 4  # fp32
+
+
+def neural_mips_kib(latent_res: int) -> float:
+    return (4 * bc_chain_bytes(latent_res) + MLP_BYTES) / 1024.0
+
+
 def bpp_neural(latent_res: int) -> float:
     latent_bits = 4 * 4.0 * (latent_res / SOURCE_RES) ** 2  # 4 BC1 textures, 4 bpp each
     mlp_bits = MLP_PARAM_COUNT * 32 / (SOURCE_RES * SOURCE_RES)
@@ -70,6 +96,10 @@ def main() -> None:
             "ratio_vs_bc7": round(BPP_TRADITIONAL_BC / bpp, 2),
             "pct_vs_direct_bc1": round(bpp / BPP_DIRECT_BC1 * 100.0, 1),
             "pct_vs_bc7": round(bpp / BPP_TRADITIONAL_BC * 100.0, 1),
+            "kib_mips": round(neural_mips_kib(res), 1),
+            "bpp_mips": round(neural_mips_kib(res) * 1024 * 8 / (SOURCE_RES * SOURCE_RES), 3),
+            "pct_vs_direct_bc1_mips": round(
+                neural_mips_kib(res) / (3 * bc_chain_bytes(SOURCE_RES) / 1024.0) * 100.0, 1),
             "psnr_float": round(f["psnr_overall"], 2),
             "psnr_bc1": round(b["psnr_overall"], 2),
             "quantization_cost_db": round(f["psnr_overall"] - b["psnr_overall"], 2),
@@ -83,9 +113,12 @@ def main() -> None:
     out = HERE / "output" / "sweep"
     out.mkdir(parents=True, exist_ok=True)
     baselines = {
-        "uncompressed_rgb8": {"bpp": BPP_UNCOMPRESSED, "kib": round(kib(BPP_UNCOMPRESSED), 1)},
-        "bc7_bc5_set": {"bpp": BPP_TRADITIONAL_BC, "kib": round(kib(BPP_TRADITIONAL_BC), 1)},
-        "direct_bc1": {"bpp": BPP_DIRECT_BC1, "kib": round(kib(BPP_DIRECT_BC1), 1)},
+        "uncompressed_rgb8": {"bpp": BPP_UNCOMPRESSED, "kib": round(kib(BPP_UNCOMPRESSED), 1),
+                              "kib_mips": round(3 * raw_chain_bytes(SOURCE_RES, 3) / 1024.0, 1)},
+        "bc7_bc5_set": {"bpp": BPP_TRADITIONAL_BC, "kib": round(kib(BPP_TRADITIONAL_BC), 1),
+                        "kib_mips": round(3 * bc_chain_bytes(SOURCE_RES, 16) / 1024.0, 1)},
+        "direct_bc1": {"bpp": BPP_DIRECT_BC1, "kib": round(kib(BPP_DIRECT_BC1), 1),
+                       "kib_mips": round(3 * bc_chain_bytes(SOURCE_RES, 8) / 1024.0, 1)},
     }
     (out / "results.json").write_text(
         json.dumps({"runs": results, "summary": rows, "baselines": baselines}, indent=2))

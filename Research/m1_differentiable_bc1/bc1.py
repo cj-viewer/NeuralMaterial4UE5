@@ -166,19 +166,32 @@ def decode_blocks(blocks: np.ndarray, height: int, width: int) -> np.ndarray:
 
 def write_dds(path, blocks: np.ndarray, height: int, width: int) -> None:
     """Minimal DDS header (DXT1 FourCC, no mips) + BC1 payload."""
+    write_dds_mips(path, [blocks], height, width)
+
+
+def write_dds_mips(path, levels: list[np.ndarray], height: int, width: int) -> None:
+    """DDS with a BC1 mip chain: levels[i] holds the packed blocks of mip i
+    (dimensions height>>i x width>>i, all multiples of 4)."""
     DDSD_FLAGS = 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000  # caps|height|width|pixelformat|linearsize
+    caps = 0x1000  # DDSCAPS_TEXTURE
+    mipcount = 0
+    if len(levels) > 1:
+        DDSD_FLAGS |= 0x20000  # DDSD_MIPMAPCOUNT
+        caps |= 0x8 | 0x400000  # DDSCAPS_COMPLEX | DDSCAPS_MIPMAP
+        mipcount = len(levels)
     pitch = max(1, (width + 3) // 4) * 8 * max(1, (height + 3) // 4)
     header = struct.pack(
         "<4s7I44x2I4s5I2I12x",
-        b"DDS ", 124, DDSD_FLAGS, height, width, pitch, 0, 0,
+        b"DDS ", 124, DDSD_FLAGS, height, width, pitch, 0, mipcount,
         32, 0x4, b"DXT1", 0, 0, 0, 0, 0,
-        0x1000, 0,
+        caps, 0,
     )
     assert len(header) == 128
+    payload = b"".join(lvl.tobytes() for lvl in levels)
     if hasattr(path, "write"):
         path.write(header)
-        path.write(blocks.tobytes())
+        path.write(payload)
     else:
         with open(path, "wb") as f:
             f.write(header)
-            f.write(blocks.tobytes())
+            f.write(payload)

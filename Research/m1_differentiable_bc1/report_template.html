@@ -1,4 +1,4 @@
-<title>M1 BC1 压缩扫描</title>
+<title>BC1 Latent 压缩实验</title>
 <style>
 :root {
   --page: #f9f9f7;
@@ -108,24 +108,36 @@ summary { cursor: pointer; color: var(--ink-2); font-size: 14px; }
 .fulls figure { margin: 0; }
 .fulls figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .fulls img { width: 100%; max-width: 100%; border-radius: 5px; border: 1px solid var(--border); display: block; }
+.grid2d { display: grid; grid-template-columns: repeat(5, 100%); grid-auto-rows: 100%; gap: 14px; overflow: auto; scroll-snap-type: both mandatory; height: min(760px, 88vh); padding: 2px; scrollbar-width: thin; }
+.lodcell { scroll-snap-align: start; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.lodhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.lodhead b { font-size: 16px; }
+.lodhead .meta { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+.badge { font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 999px; background: rgba(235, 104, 52, 0.14); color: var(--bc1); white-space: nowrap; }
+.lodgrid { display: grid; grid-template-columns: 72px repeat(5, 1fr); gap: 6px; align-items: center; }
+.lodgrid .lg-h { font-size: 11.5px; color: var(--muted); text-align: center; }
+.lodgrid .lg-lab { font-size: 12.5px; color: var(--ink-2); }
+.lodgrid img { width: 100%; max-width: 100%; border-radius: 4px; border: 1px solid var(--border); display: block; }
+.swipehint { text-align: center; font-size: 12px; color: var(--muted); margin-top: 2px; }
 footer { margin-top: 44px; color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--grid); padding-top: 14px; }
 </style>
 
 <div class="wrap">
   <header class="page">
-    <p class="eyebrow">NeuralMaterial4UE5 · Research · Milestone M1</p>
-    <h1>可微 BC1 latent：压缩率 × 误差扫描</h1>
+    <p class="eyebrow">NeuralMaterial4UE5 · Research · Milestone M1 + M2</p>
+    <h1>可微 BC1 latent：压缩率、误差与 mip 实验</h1>
     <p class="lede">
       4 张 BC1 latent 纹理 + <span class="mono">12→32→9</span> FMA MLP 重建 9 通道 PBR 材质
       （512² 合成瓷砖集，BaseColor / Normal / AO / Roughness / Metallic）。
       训练中对端点（RGB565）与索引（2-bit）做 STE 量化感知训练，每组 20 000 迭代；
       float 对照组与 BC1 组在同一 latent 分辨率下逐组对比，隔离出量化代价。
+      M2 起每层 latent mip 独立训练，连续 LOD 采样与 GPU trilinear 对齐。
     </p>
     <div class="stats">
       <div class="stat"><div class="v">39.0 <span class="unit">dB</span></div><div class="k">BC1 质量上限（4×512² latent，16.1 bpp）</div></div>
       <div class="stat"><div class="v">76%<span class="unit"> 于直接 BC1</span></div><div class="k">甜点配置 384²：291 KiB · 37.9 dB（38% 于 BC7/BC5）</div></div>
       <div class="stat"><div class="v">9%<span class="unit"> 于直接 BC1</span></div><div class="k">极限配置 128²：35 KiB · 29.0 dB（5% 于 BC7/BC5）</div></div>
-      <div class="stat"><div class="v">55 / 55</div><div class="k">位流验证全部通过（含 Pillow 独立解码 ≤1 LSB）</div></div>
+      <div class="stat"><div class="v">+4~5 <span class="unit">dB</span></div><div class="k">训练 mip vs 朴素导出 mip（512 组，lod1–4，代价仅 lod0 −0.6 dB）</div></div>
     </div>
   </header>
 
@@ -144,11 +156,21 @@ footer { margin-top: 44px; color: var(--muted); font-size: 12.5px; border-top: 1
 
   <section>
     <h2>显存占用</h2>
-    <p class="sub">一套 512² 材质集（9 通道）的显存开销，仅 base 层、不含 mip 链；Neural 方案已计入 fp32 MLP（2.8 KiB）。基准 100% = 三张源图直接压成 BC1（12 bpp / 384 KiB）。悬停条形可查看数值。</p>
+    <p class="sub">一套 512² 材质集（9 通道）的显存开销，<b>含完整 mip 链</b>（M2 起每方案都带 mip；latent 链到 4²，基线按各自格式惯例），Neural 方案计入 fp32 MLP（2.8 KiB）。基准 100% = 三张源图直接压成 BC1 并带 mip（512 KiB）。悬停条形可查看数值。</p>
     <div class="card">
       <!--MEMCHART-->
     </div>
-    <p class="grid-note">未压缩 RGB8 三图为 2304 KiB（600%），未画入图中。4×512² 布局比直接 BC1 还大 34%——它的意义是质量上限参考，不是实用配置；384² 起显存开始低于直接 BC1，而质量（37.9 dB）远高于直接 BC1 对 Normal/ARM 这类数据的压缩效果。M2 加入 mip 链后各方案约同比 +33%，相对百分比基本不变。</p>
+    <div class="card tablewrap" style="margin-top:14px">
+      <table>
+        <thead>
+          <tr><th>方案</th><th>base 层 KiB</th><th>含 mip 链 KiB</th><th>bpp（含 mip）</th><th>vs 直接 BC1</th><th>vs BC7/BC5</th></tr>
+        </thead>
+        <tbody>
+          <!--MEM_TABLE-->
+        </tbody>
+      </table>
+    </div>
+    <p class="grid-note">mip 链把各方案同比放大约 4/3，相对百分比与仅 base 层时几乎一致（差异来自 latent 链止于 4²、MLP 为常数项）。384²/192² 为非 2 幂分辨率，深层 mip 含部分块（按 ceil 计），M2 训练端当前只导出 2 幂配置。4×512² 比直接 BC1 大 34%——它是质量上限参考而非实用配置；384² 起显存低于直接 BC1，且质量远高于直接 BC1 压 Normal/ARM 的效果。</p>
   </section>
 
   <section>
@@ -191,6 +213,39 @@ footer { margin-top: 44px; color: var(--muted); font-size: 12.5px; border-top: 1
   </section>
 
   <section>
+    <h2>Mip / LOD：训练 mip vs 朴素导出 mip（M2）</h2>
+    <p class="sub">每层 latent mip 为独立可训练的 BC1 参数，训练时连续采样 lod = U<sup>p</sup>·max_lod（默认 p=2，向低 LOD 加权），三线性 = 逐层解码 BC1 → 双线性 → 层间插值，与 GPU 行为逐位一致。朴素基线只训 base 层，mip 由“解码 → 2×2 box 下采样 → PCA 端点拟合重编码”生成（即传统导出器做法）。</p>
+    <div class="card">
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--bc1)"></span>mip 训练</span>
+        <span><span class="swatch" style="background:var(--float)"></span>朴素 mip</span>
+        <span style="color:var(--muted)">实线 = 4×512² · 虚线 = 4×256² · 点线 = 4×128²</span>
+      </div>
+      <!--LODCHART-->
+    </div>
+    <p class="grid-note">朴素 mip 从 lod2 起崩到 26–31 dB——解码后的 BC1 内容经不起再量化；训练 mip 在 512 组以 lod0 −0.6 dB 的代价换来 lod1–4 全面 +4~5 dB。256 组（latent 比源粗一档）的 base 层被 lod0/lod1 两种目标共享，lod0 存在硬上限，<code>--lod-pow</code> 只在 lod0↔lod1 间做权衡（详见下表）。</p>
+
+    <div class="card tablewrap" style="margin-top:14px">
+      <table>
+        <thead>
+          <tr><th>配置</th><th>LOD 采样</th><th>lod0</th><th>lod1</th><th>lod2</th><th>lod3</th><th>lod4</th></tr>
+        </thead>
+        <tbody>
+          <!--LOD_TABLE-->
+        </tbody>
+      </table>
+    </div>
+    <p class="grid-note">PSNR（dB），逐 LOD 在对应参考 mip 分辨率的全网格上计算。结论：要 lod0 保真优先让 latent 分辨率等于源分辨率；latent 更粗时按资产调 p（training profile 参数，规格 §7.3）。</p>
+
+    <p class="sub" style="margin-top:18px">逐 mip 级 × 逐 latent 大小的重建对比：<b>横向滑动切 LOD（0–4）</b>，<b>纵向滑动切 latent 大小（4×512² / 4×256² / 4×128²）</b>。每张卡片左上角为该配置<b>含 mip 链显存相对直接 BC1 的百分比</b>；卡内为全部 5 张输出贴图，行为 参考 / mip 训练 / 朴素 mip。图像统一 256px 展示（高 LOD 最近邻放大），全部由导出的 BC1 字节流经 numpy gold 路径重建。</p>
+    <div class="grid2d">
+      <!--LOD_CARDS-->
+    </div>
+    <p class="swipehint">→ 横滑：mip 等级 · ↓ 纵滑：latent 大小（触屏滑动 / 触控板 / Shift+滚轮横滑）</p>
+    <p class="grid-note">从 lod2 起朴素 mip 的再量化噪点在所有通道上可见，lod3/lod4 偏色加剧；训练 mip 各级都贴近参考。latent 越小（显存百分比越低），base 层细节越少，但训练 mip 在高 LOD 的优势在每个大小档位上都成立。</p>
+  </section>
+
+  <section>
     <h2>位流与数据契约验证</h2>
     <div class="card">
       <ul class="checks">
@@ -198,7 +253,8 @@ footer { margin-top: 44px; color: var(--muted); font-size: 12.5px; border-top: 1
         <li>全部打包 block 满足 opaque 模式约束 <code>c0 ≥ c1</code>；端点交换时索引同步翻转（w→1−w）</li>
         <li>退化 block（端点相等）强制索引 0，杜绝 3-color/alpha 模式的透明黑</li>
         <li>Pillow 独立 DXT1 解码器读取导出的 <code>.dds</code>，与我们的解码最大差 1 LSB（容差 2）</li>
-        <li>5 组训练导出 × 10 项检查全部 PASS；<code>fixtures.npz</code> 可仅凭打包字节流复现训练时 MLP 输出（&lt;1e-5）</li>
+        <li>5 组 M1 训练导出 × 10 项检查全部 PASS；<code>fixtures.npz</code> 可仅凭打包字节流复现训练时 MLP 输出（&lt;1e-5）</li>
+        <li>M2：torch 三线性 与 numpy gold 三线性逐位一致（含 LOD 边界钳制）；DDS mip 链头部/逐级 payload 布局自测通过，Pillow 可读；全部 M2 导出的 (uv, lod) fixture 特征与 MLP 输出可由字节流独立复现</li>
       </ul>
     </div>
   </section>
@@ -212,6 +268,6 @@ footer { margin-top: 44px; color: var(--muted); font-size: 12.5px; border-top: 1
   </section>
 
   <footer>
-    NeuralMaterial4UE5 · M1 差异化 BC1 实验 · 数据来源 <span class="mono">Research/m1_differentiable_bc1/output/sweep/results.json</span>（20 000 迭代 / 组，RTX 5060 Ti，torch 2.11+cu128）· 2026-09-21
+    NeuralMaterial4UE5 · M1/M2 可微 BC1 实验 · 数据来源 <span class="mono">Research/m1_differentiable_bc1/output/sweep/results.json</span> 与 <span class="mono">Research/m2_mip_lod/output/*/metrics.json</span>（20 000 迭代 / 组，RTX 5060 Ti，torch 2.11+cu128）· 2026-09-21
   </footer>
 </div>

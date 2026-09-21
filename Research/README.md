@@ -11,6 +11,8 @@ Shared Python environment: `Research/.venv` (torch cu128 + numpy + pillow), crea
   with numpy gold fixtures for the later D3D12/UE comparisons. See its README.
 - `m1_differentiable_bc1/` — M1: STE-quantized simulated-BC1 latents, real BC1/DDS
   exporter with independent-decoder validation, float-vs-BC1 resolution sweep. See its README.
+- `m2_mip_lod/` — M2: independently trained BC1 mip pyramids, continuous-LOD training
+  against box-filtered reference targets, mipped DDS export, naive-mip A/B baseline. See its README.
 
 Suggested first experiments:
 
