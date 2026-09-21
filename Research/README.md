@@ -9,6 +9,8 @@ Shared Python environment: `Research/.venv` (torch cu128 + numpy + pillow), crea
 
 - `m0_float_latent_baseline/` — M0: float latent + MLP reconstruction of one PBR set,
   with numpy gold fixtures for the later D3D12/UE comparisons. See its README.
+- `m1_differentiable_bc1/` — M1: STE-quantized simulated-BC1 latents, real BC1/DDS
+  exporter with independent-decoder validation, float-vs-BC1 resolution sweep. See its README.
 
 Suggested first experiments:
 

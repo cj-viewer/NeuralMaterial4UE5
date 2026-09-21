@@ -30,7 +30,8 @@ class LatentTextures(nn.Module):
         grid = (uv * 2.0 - 1.0).view(1, 1, -1, 2)
         feats = []
         for tex in self.textures:
-            t = tex.clamp(0.0, 1.0) if self.clamp01 else tex
+            # Pass-through clamp: identity gradient so out-of-range texels can recover.
+            t = tex + (tex.clamp(0.0, 1.0) - tex).detach() if self.clamp01 else tex
             s = F.grid_sample(t, grid, mode="bilinear", padding_mode="border", align_corners=False)
             feats.append(s[0, :, 0, :].t())  # [B, C]
         return torch.cat(feats, dim=-1)
