@@ -26,7 +26,20 @@
 
 #include <d3dx12.h>
 #include <d3dcompiler.h>
+#include <dxcapi.h>
 #include "d3d12.hpp"
+
+// Preview Agility SDK exports (D3D12Core.dll is copied to <exe dir>\D3D12 by
+// the build script); required for the D3D12 Linear Algebra (cooperative
+// vector) preview feature used by the LinAlg MLP backend.
+extern "C" {
+	__declspec(dllexport) extern const UINT D3D12SDKVersion;
+	__declspec(dllexport) extern const char* D3D12SDKPath;
+}
+extern "C" {
+	const UINT D3D12SDKVersion = D3D12_PREVIEW_SDK_VERSION;
+	const char* D3D12SDKPath = ".\\D3D12\\";
+}
 
 namespace D3D12 {
 
@@ -52,6 +65,17 @@ GLFWwindow* Renderer::initialize(int width, int height, int maxSamples)
 	GLFWwindow* window = glfwCreateWindow(width, height, "Physically Based Rendering (Direct3D 12)", nullptr, nullptr);
 	if(!window) {
 		throw std::runtime_error("Failed to create window");
+	}
+
+	// Opt into experimental shader models + the cooperative-vector experiment
+	// (SM 6.9 preview); requires Windows Developer Mode. Failure just disables
+	// the LinAlg MLP backend.
+	{
+		UUID experiments[] = { D3D12ExperimentalShaderModels, D3D12CooperativeVectorExperiment };
+		if(FAILED(D3D12EnableExperimentalFeatures(_countof(experiments), experiments, nullptr, nullptr))) {
+			std::printf("D3D12EnableExperimentalFeatures failed (Developer Mode off?); LinAlg backend disabled.\n");
+			m_experimentalShaderModels = false;
+		}
 	}
 
 	UINT dxgiFactoryFlags = 0;
@@ -232,7 +256,8 @@ void Renderer::setup()
 
 	// Create root signature & pipeline configuration for rendering PBR model.
 	{
-		const std::vector<D3D12_INPUT_ELEMENT_DESC> meshInputLayout = {
+		// static: the PSO desc is kept in m_pbrPsoDesc for the LinAlg variant.
+		static const std::vector<D3D12_INPUT_ELEMENT_DESC> meshInputLayout = {
 			{ "POSITION",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 			{ "NORMAL",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 			{ "TANGENT",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -248,18 +273,20 @@ void Renderer::setup()
 			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC},
 			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 7, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC}, // neural latents t7-t10
 			{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC}, // neural weights b1
+			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 11, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC}, // fp16 weights t11 (LinAlg)
 		};
-		CD3DX12_ROOT_PARAMETER1 rootParameters[5];
+		CD3DX12_ROOT_PARAMETER1 rootParameters[6];
 		rootParameters[0].InitAsDescriptorTable(1, &descriptorRanges[0], D3D12_SHADER_VISIBILITY_VERTEX);
 		rootParameters[1].InitAsDescriptorTable(1, &descriptorRanges[0], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParameters[2].InitAsDescriptorTable(1, &descriptorRanges[1], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParameters[3].InitAsDescriptorTable(1, &descriptorRanges[2], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParameters[4].InitAsDescriptorTable(1, &descriptorRanges[3], D3D12_SHADER_VISIBILITY_PIXEL);
+		rootParameters[5].InitAsDescriptorTable(1, &descriptorRanges[4], D3D12_SHADER_VISIBILITY_PIXEL);
 		D3D12_STATIC_SAMPLER_DESC staticSamplers[2];
 		staticSamplers[0] = defaultSamplerDesc;
 		staticSamplers[1] = spBRDF_SamplerDesc;
 		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC signatureDesc;
-		signatureDesc.Init_1_1(5, rootParameters, 2, staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+		signatureDesc.Init_1_1(6, rootParameters, 2, staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 		m_pbrRootSignature = createRootSignature(signatureDesc);
 
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
@@ -281,6 +308,7 @@ void Renderer::setup()
 		if(FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pbrPipelineState)))) {
 			throw std::runtime_error("Failed to create graphics pipeline state for PBR model");
 		}
+		m_pbrPsoDesc = psoDesc; // reused by the LinAlg PSO (input layout is static)
 	}
 
 	// Load PBR model assets.
@@ -542,6 +570,9 @@ void Renderer::setup()
 	// Must run after m_constantBuffer exists: the weights CBV allocates from it.
 	loadNeuralMaterial();
 
+	// Optional LinAlg (cooperative vector) MLP backend, toggled with the C key.
+	setupLinAlgBackend();
+
 	// Stats: material texture VRAM (classic maps vs neural latents + weights)
 	// and a timestamp query pair around the PBR draw, double-buffered per frame.
 	{
@@ -639,10 +670,12 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
 			m_titleUpdateCounter = 0;
 			static const char* modeNames[] = { "classic", "neural", "diff B/W x8" };
 			const int mode = m_neuralAvailable ? scene.materialMode : 0;
+			const char* backend = !m_linalgAvailable ? "fma"
+				: (scene.useLinAlg ? "linalg" : "fma");
 			char title[256];
 			std::snprintf(title, sizeof(title),
-				"PBR (Direct3D 12) | mode: %s | material VRAM: classic %.1f MB / neural %.2f MB | PBR pass: %.3f ms",
-				modeNames[mode], m_classicTextureBytes / (1024.0 * 1024.0),
+				"PBR (Direct3D 12) | mode: %s | mlp: %s | material VRAM: classic %.1f MB / neural %.2f MB | PBR pass: %.3f ms",
+				modeNames[mode], backend, m_classicTextureBytes / (1024.0 * 1024.0),
 				m_neuralTextureBytes / (1024.0 * 1024.0), m_pbrPassMs);
 			glfwSetWindowTitle(window, title);
 		}
@@ -697,7 +730,11 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
 			m_commandList->SetGraphicsRootDescriptorTable(3, m_latentTextures[0].srv.gpuHandle);
 			m_commandList->SetGraphicsRootDescriptorTable(4, m_neuralWeightsCBV.cbv.gpuHandle);
 		}
-		m_commandList->SetPipelineState(m_pbrPipelineState.Get());
+		if(m_linalgAvailable) {
+			m_commandList->SetGraphicsRootDescriptorTable(5, m_neuralWeightsFP16SRV.gpuHandle);
+		}
+		const bool useLinAlg = m_linalgAvailable && scene.useLinAlg;
+		m_commandList->SetPipelineState(useLinAlg ? m_pbrLinAlgPipelineState.Get() : m_pbrPipelineState.Get());
 
 		m_commandList->IASetVertexBuffers(0, 1, &m_pbrModel.vbv);
 		m_commandList->IASetIndexBuffer(&m_pbrModel.ibv);
@@ -977,6 +1014,159 @@ Texture Renderer::createTexture(const std::shared_ptr<Image>& image, DXGI_FORMAT
 	return texture;
 }
 
+namespace {
+
+uint16_t floatToHalf(float value)
+{
+	// Round-to-nearest-even IEEE 754 binary16 conversion (no F16C dependency).
+	uint32_t bits;
+	std::memcpy(&bits, &value, 4);
+	const uint32_t sign = (bits >> 16) & 0x8000;
+	int32_t exponent = int32_t((bits >> 23) & 0xFF) - 127 + 15;
+	uint32_t mantissa = bits & 0x7FFFFF;
+	if(exponent >= 31) {
+		return uint16_t(sign | 0x7C00); // overflow -> inf
+	}
+	if(exponent <= 0) {
+		if(exponent < -10) {
+			return uint16_t(sign); // underflow -> zero
+		}
+		mantissa |= 0x800000; // subnormal
+		const uint32_t shift = uint32_t(14 - exponent);
+		const uint32_t rounded = (mantissa + (1u << (shift - 1))) >> shift;
+		return uint16_t(sign | rounded);
+	}
+	const uint32_t rounded = (mantissa + 0x1000) >> 13;
+	return uint16_t(sign | ((uint32_t(exponent) << 10) + rounded)); // carry may bump the exponent, which is correct
+}
+
+ComPtr<IDxcBlob> compileShaderDXC(const std::wstring& filename, const std::wstring& entryPoint, const std::wstring& profile)
+{
+	ComPtr<IDxcUtils> utils;
+	ComPtr<IDxcCompiler3> compiler;
+	if(FAILED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) ||
+	   FAILED(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
+		throw std::runtime_error("DxcCreateInstance failed (dxcompiler.dll missing?)");
+	}
+	ComPtr<IDxcIncludeHandler> includeHandler;
+	utils->CreateDefaultIncludeHandler(&includeHandler);
+
+	ComPtr<IDxcBlobEncoding> source;
+	if(FAILED(utils->LoadFile(filename.c_str(), nullptr, &source))) {
+		throw std::runtime_error("DXC: could not load shader source");
+	}
+	std::printf("Compiling HLSL shader (DXC): shaders/hlsl/pbr.hlsl [%ls, %ls]\n", entryPoint.c_str(), profile.c_str());
+
+	LPCWSTR arguments[] = {
+		filename.c_str(),
+		L"-E", entryPoint.c_str(),
+		L"-T", profile.c_str(),
+		L"-HV", L"2021",
+		L"-enable-16bit-types",
+		L"-I", L"../external/DXC2505/build/native/include/hlsl", // dx/linalg.h (CWD is PBR/data)
+		L"-DUSE_LINALG=1",
+		L"-O3",
+	};
+	DxcBuffer sourceBuffer{source->GetBufferPointer(), source->GetBufferSize(), DXC_CP_ACP};
+	ComPtr<IDxcResult> result;
+	if(FAILED(compiler->Compile(&sourceBuffer, arguments, _countof(arguments), includeHandler.Get(), IID_PPV_ARGS(&result)))) {
+		throw std::runtime_error("DXC compile call failed");
+	}
+	ComPtr<IDxcBlobUtf8> errors;
+	result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+	HRESULT status;
+	result->GetStatus(&status);
+	if(errors && errors->GetStringLength() > 0 && FAILED(status)) {
+		std::printf("DXC errors:\n%s\n", errors->GetStringPointer());
+	}
+	if(FAILED(status)) {
+		throw std::runtime_error("DXC shader compilation failed");
+	}
+	ComPtr<IDxcBlob> object;
+	result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&object), nullptr);
+	return object;
+}
+
+} // namespace
+
+void Renderer::setupLinAlgBackend()
+{
+	if(!m_neuralAvailable || !m_experimentalShaderModels) {
+		return;
+	}
+	try {
+		char corePath[MAX_PATH] = "not loaded";
+		if(HMODULE core = GetModuleHandleA("D3D12Core.dll")) {
+			GetModuleFileNameA(core, corePath, MAX_PATH);
+		}
+		std::printf("D3D12Core: %s\n", corePath);
+
+		D3D12_FEATURE_DATA_D3D12_OPTIONS_EXPERIMENTAL experimental = {};
+		const HRESULT hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS_EXPERIMENTAL, &experimental, sizeof(experimental));
+		if(FAILED(hr) || experimental.CooperativeVectorTier == D3D12_COOPERATIVE_VECTOR_TIER_NOT_SUPPORTED) {
+			std::printf("LinAlg backend: no cooperative-vector tier (hr=0x%08x, tier=0x%x); staying on FMA.\n",
+				(unsigned)hr, experimental.CooperativeVectorTier);
+			std::fflush(stdout);
+			return;
+		}
+		const UINT cooperativeVectorTier = experimental.CooperativeVectorTier;
+
+		// fp16 weight buffer; layout must match the USE_LINALG block in pbr.hlsl:
+		// W0 (32x12 row-major, stride 24) @0, b0 @1024, W1 (9x32, stride 64) @1152, b1 @1792.
+		std::vector<uint16_t> packed(1024, 0); // 2048 bytes
+		const float* w = m_neuralWeightsF32.data();
+		for(int i = 0; i < 32 * 12; ++i) packed[i] = floatToHalf(w[i]);
+		for(int i = 0; i < 32; ++i) packed[512 + i] = floatToHalf(w[384 + i]);
+		for(int i = 0; i < 9 * 32; ++i) packed[576 + i] = floatToHalf(w[416 + i]);
+		for(int i = 0; i < 9; ++i) packed[896 + i] = floatToHalf(w[704 + i]);
+
+		const UINT bufferSize = UINT(packed.size() * sizeof(uint16_t));
+		if(FAILED(m_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES{D3D12_HEAP_TYPE_UPLOAD},
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(bufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&m_neuralWeightsFP16))))
+		{
+			throw std::runtime_error("Failed to create fp16 weight buffer");
+		}
+		void* mapped;
+		m_neuralWeightsFP16->Map(0, &CD3DX12_RANGE{0, 0}, &mapped);
+		std::memcpy(mapped, packed.data(), bufferSize);
+		m_neuralWeightsFP16->Unmap(0, nullptr);
+
+		m_neuralWeightsFP16SRV = m_descHeapCBV_SRV_UAV.alloc();
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Buffer.NumElements = bufferSize / 4;
+		srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		m_device->CreateShaderResourceView(m_neuralWeightsFP16.Get(), &srvDesc, m_neuralWeightsFP16SRV.cpuHandle);
+
+		ComPtr<IDxcBlob> vs = compileShaderDXC(L"shaders/hlsl/pbr.hlsl", L"main_vs", L"vs_6_9");
+		ComPtr<IDxcBlob> ps = compileShaderDXC(L"shaders/hlsl/pbr.hlsl", L"main_ps", L"ps_6_9");
+
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = m_pbrPsoDesc;
+		psoDesc.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+		psoDesc.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		if(FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pbrLinAlgPipelineState)))) {
+			throw std::runtime_error("Failed to create LinAlg PBR pipeline state");
+		}
+
+		m_linalgAvailable = true;
+		std::printf("LinAlg MLP backend ready (cooperative-vector tier 0x%x, SM 6.9, fp16 row-major weights). Press C to toggle FMA/LinAlg.\n",
+			cooperativeVectorTier);
+		std::fflush(stdout);
+	}
+	catch(const std::exception& e) {
+		std::printf("LinAlg backend disabled: %s\n", e.what());
+		std::fflush(stdout);
+		m_linalgAvailable = false;
+	}
+}
+
 UINT64 Renderer::textureAllocationBytes(const Texture& texture) const
 {
 	if(!texture.texture) {
@@ -1073,6 +1263,7 @@ void Renderer::loadNeuralMaterial()
 		file.seekg(0);
 		file.read(reinterpret_cast<char*>(weights.data()), size);
 		m_neuralWeightsCBV = createConstantBufferView(weights.data(), static_cast<UINT>(size));
+		m_neuralWeightsF32 = weights; // kept for the fp16 LinAlg weight buffer
 
 		m_neuralAvailable = true;
 		std::printf("Neural material loaded (4 BC1 latent mip chains + 12-32-9 MLP). Press N to toggle.\n");

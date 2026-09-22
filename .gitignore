@@ -26,9 +26,10 @@ Research/neural-compression-textures/
 Research/m3_pbr_visual/data/
 
 # Vendored PBR test renderer (Research/PBR): committed with our modifications;
-# build artifacts and regenerable BC1 baselines stay out.
+# build artifacts, regenerable BC1 baselines and downloaded SDKs stay out.
 Research/PBR/build/
 Research/PBR/data/textures_bc1/
+Research/PBR/external/
 
 # OS files
 .DS_Store

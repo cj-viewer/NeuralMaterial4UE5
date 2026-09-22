@@ -73,6 +73,47 @@ separate BC1 textures, hence 4 maps.
   multiplied by the AO output (classic path uses ao=1: Cerberus has no AO map).
 - `src/common/mesh.cpp`: `#include <stdexcept>` (MSVC 2022 compat).
 
+## LinAlg / cooperative-vector MLP backend (C key)
+
+A second PBR PSO runs the MLP through the D3D12 cooperative-vector preview
+(HLSL `dx/linalg.h` `MulAdd`, SM 6.9, fp16 row-major weights in a
+ByteAddressBuffer at t11), compiled at runtime with DXC. `C` toggles FMA ↔
+LinAlg; the title's PBR-pass time gives the comparison. Fully feature-gated:
+missing prerequisites just leave the FMA path active.
+
+Prerequisites (all verified except the last):
+- Windows Developer Mode ON;
+- preview Agility SDK + preview DXC in `PBR/external/` (gitignored; NuGet
+  `Microsoft.Direct3D.D3D12` 1.717.1-preview + `Microsoft.Direct3D.DXC`
+  1.8.2505.32 — the SM 6.9 cooperative-vector pairing; the 1.721-preview /
+  SM 6.10 "Linear Algebra" rename is also present under `external/` but no
+  current driver exposes it);
+- the exe exports `D3D12SDKVersion=717` and enables BOTH
+  `D3D12ExperimentalShaderModels` and `D3D12CooperativeVectorExperiment`
+  (same sequence as Intel's TSNC sample);
+- **a driver exposing the DX12 cooperative-vector preview DDI**. Game Ready
+  drivers (tested: 610.47) report `CooperativeVectorTier = NOT_SUPPORTED`;
+  NVIDIA's SM 6.9 *preview* driver is required
+  (developer.nvidia.com/downloads/shadermodel6-9-preview-driver). Note the
+  retail SM 6.9 / Agility 1.619 release dropped cooperative vectors entirely
+  (deprecated pending the SM 6.10 LinAlg redesign, whose preview drivers NVIDIA
+  does not distribute publicly), so the 1.717-preview pairing is currently the
+  only public path.
+
+**Measured (RTX 5060 Ti, preview driver 590.26, cooperative-vector tier 0x11,
+1080p, gun filling the frame, EMA over 8 samples):**
+
+| MLP backend | PBR pass | speedup |
+|---|---|---|
+| FMA fp32 (SM 5.0) | 0.292 ms | 1× |
+| LinAlg fp16 row-major (SM 6.9) | 0.120 ms | **2.4×** |
+
+The pass includes shading/IBL/BC1 sampling common to both paths, so the
+MLP-only speedup is higher. Renders match within fp16 rounding (0.18% of
+pixels differ by >10/765 luma steps, on specular edges). Next lever:
+`ConvertLinearAlgebraMatrix` to MUL_OPTIMAL layout (row-major is the slowest
+legal layout) and an fp16-weight FMA control to separate precision from ISA.
+
 ## Notes / limitations
 
 - Cerberus has no AO map; the trainer gets a constant-white `ao.png`, so the

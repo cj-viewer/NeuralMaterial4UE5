@@ -156,6 +156,7 @@ private:
 	Texture createTexture(const std::shared_ptr<class Image>& image, DXGI_FORMAT format, UINT levels=0);
 	Texture createTextureFromBC1DDS(const std::string& filename, bool srgb = false);
 	void loadNeuralMaterial();
+	void setupLinAlgBackend();
 	void generateMipmaps(const Texture& texture);
 
 	void createTextureSRV(Texture& texture, D3D12_SRV_DIMENSION dimension, UINT mostDetailedMip=0, UINT mipLevels=0);
@@ -217,6 +218,15 @@ private:
 	Texture m_latentTextures[4];
 	ConstantBufferView m_neuralWeightsCBV;
 	bool m_neuralAvailable = false;
+
+	// LinAlg (cooperative vector) MLP backend: SM 6.10 preview PSO + fp16 weights.
+	bool m_experimentalShaderModels = true;
+	bool m_linalgAvailable = false;
+	ComPtr<ID3D12PipelineState> m_pbrLinAlgPipelineState;
+	ComPtr<ID3D12Resource> m_neuralWeightsFP16;
+	Descriptor m_neuralWeightsFP16SRV;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC m_pbrPsoDesc = {};
+	std::vector<float> m_neuralWeightsF32;
 
 	// Stats overlay (window title): material texture VRAM + PBR pass GPU time.
 	ComPtr<ID3D12QueryHeap> m_timestampQueryHeap;

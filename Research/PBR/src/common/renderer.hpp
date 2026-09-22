@@ -32,6 +32,11 @@ struct SceneSettings
 	// N toggles 0<->1, D toggles the difference view. Forced to 0 when no
 	// neural assets are loaded.
 	int materialMode = 1;
+
+	// MLP backend for the neural material: false = plain FMA (SM 5.0),
+	// true = D3D12 Linear Algebra / cooperative vectors (SM 6.10 preview).
+	// C toggles; ignored when the LinAlg backend is unavailable.
+	bool useLinAlg = false;
 };
 
 class RendererInterface

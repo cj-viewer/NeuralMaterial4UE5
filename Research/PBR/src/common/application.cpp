@@ -14,7 +14,7 @@ namespace {
 	const int DisplaySizeY = 1080;
 	const int DisplaySamples = 16;
 
-	const float ViewDistance = 150.0f;
+	const float ViewDistance = 45.0f;
 	const float ViewFOV      = 45.0f;
 	const float OrbitSpeed   = 1.0f;
 	const float ZoomSpeed    = 4.0f;
@@ -162,6 +162,11 @@ void Application::keyCallback(GLFWwindow* window, int key, int scancode, int act
 		if(key == GLFW_KEY_N || key == GLFW_KEY_D) {
 			static const char* names[] = { "classic textures", "neural material", "B/W difference" };
 			std::printf("Material mode: %s\n", names[mode]);
+			std::fflush(stdout);
+		}
+		if(key == GLFW_KEY_C) {
+			self->m_sceneSettings.useLinAlg = !self->m_sceneSettings.useLinAlg;
+			std::printf("MLP backend request: %s\n", self->m_sceneSettings.useLinAlg ? "LinAlg" : "FMA");
 			std::fflush(stdout);
 		}
 	}

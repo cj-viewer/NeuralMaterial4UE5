@@ -69,6 +69,15 @@ Texture2D latentTexture1 : register(t8);
 Texture2D latentTexture2 : register(t9);
 Texture2D latentTexture3 : register(t10);
 
+#if USE_LINALG
+// SM 6.9 cooperative-vector MLP backend (D3D12 preview), compiled with DXC.
+// fp16 weight buffer layout (bytes): W0 32x12 row-major stride 24 @0,
+// b0 @1024, W1 9x32 row-major stride 64 @1152, b1 @1792.
+#include <dx/linalg.h>
+using namespace dx::linalg;
+ByteAddressBuffer neuralWeightsFP16 : register(t11);
+#endif
+
 SamplerState defaultSampler : register(s0);
 SamplerState spBRDF_Sampler : register(s1);
 
@@ -130,6 +139,30 @@ void neuralMaterial(float2 uv, out float3 albedo, out float3 tangentNormal,
 	x[6] = f2.r; x[7]  = f2.g; x[8]  = f2.b;
 	x[9] = f3.r; x[10] = f3.g; x[11] = f3.b;
 
+#if USE_LINALG
+	vector<half, 12> xh;
+	[unroll]
+	for(uint i = 0; i < 12; ++i) {
+		xh[i] = (half)x[i];
+	}
+
+	MatrixRef<DATA_TYPE_FLOAT16, 32, 12, MATRIX_LAYOUT_ROW_MAJOR> w0m = {neuralWeightsFP16, 0, 24};
+	VectorRef<DATA_TYPE_FLOAT16> b0v = {neuralWeightsFP16, 1024};
+	vector<half, 32> hiddenV =
+		MulAdd<half>(w0m, MakeInterpretedVector<DATA_TYPE_FLOAT16>(xh), b0v);
+	hiddenV = max(hiddenV, (half)0.0);
+
+	MatrixRef<DATA_TYPE_FLOAT16, 9, 32, MATRIX_LAYOUT_ROW_MAJOR> w1m = {neuralWeightsFP16, 1152, 64};
+	VectorRef<DATA_TYPE_FLOAT16> b1v = {neuralWeightsFP16, 1792};
+	vector<half, 9> yh =
+		MulAdd<half>(w1m, MakeInterpretedVector<DATA_TYPE_FLOAT16>(hiddenV), b1v);
+
+	float y[9];
+	[unroll]
+	for(uint o = 0; o < 9; ++o) {
+		y[o] = (float)yh[o];
+	}
+#else
 	float hidden[32];
 	[unroll]
 	for(uint j = 0; j < 32; ++j) {
@@ -151,6 +184,7 @@ void neuralMaterial(float2 uv, out float3 albedo, out float3 tangentNormal,
 		}
 		y[o] = v;
 	}
+#endif
 
 	// The MLP reproduces storage-space texture values; convert exactly like the
 	// classic path does (albedo texture is an sRGB view, normal is *2-1).
