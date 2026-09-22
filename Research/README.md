@@ -14,9 +14,9 @@ Shared Python environment: `Research/.venv` (torch cu128 + numpy + pillow), crea
 - `m2_mip_lod/` — M2: independently trained BC1 mip pyramids, continuous-LOD training
   against box-filtered reference targets, mipped DDS export, naive-mip A/B baseline. See its README.
 - `m3_pbr_visual/` — M3a: the neural material rendered inside a real D3D12 PBR+IBL
-  renderer (Nadrin/PBR clone, gitignored, modified via `pbr_neural.patch`): hardware BC1
-  decode + FMA MLP in HLSL, live VRAM/GPU-time stats, N/D toggles vs a direct-BC1
-  classic baseline. See its README.
+  renderer. The renderer source (based on Nadrin/PBR, MIT) is vendored with our
+  modifications at `Research/PBR/`: hardware BC1 decode + FMA MLP in HLSL, live
+  VRAM/GPU-time stats, N/D toggles vs a direct-BC1 classic baseline. See its README.
 
 Suggested first experiments:
 

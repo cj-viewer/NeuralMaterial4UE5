@@ -23,8 +23,12 @@ Research/m0_float_latent_baseline/data/
 # Third-party reference checkouts (see Research/README.md)
 Research/TextureSetNeuralCompressionSample/
 Research/neural-compression-textures/
-Research/PBR/
 Research/m3_pbr_visual/data/
+
+# Vendored PBR test renderer (Research/PBR): committed with our modifications;
+# build artifacts and regenerable BC1 baselines stay out.
+Research/PBR/build/
+Research/PBR/data/textures_bc1/
 
 # OS files
 .DS_Store

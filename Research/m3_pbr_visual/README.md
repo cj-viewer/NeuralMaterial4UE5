@@ -14,11 +14,15 @@ drivers, a preview Agility SDK and Developer Mode.
 
 | Piece | Where |
 |---|---|
-| Renderer clone (gitignored, modified in place) | `Research/PBR/` — upstream `Nadrin/PBR` @ `cd61a5d5` |
-| Our modifications as a patch | `pbr_neural.patch` (apply: `git -C ../PBR apply ../m3_pbr_visual/pbr_neural.patch`; regenerate: `git -C ../PBR diff > pbr_neural.patch`) |
+| Renderer source, **vendored with our modifications** | `Research/PBR/` — based on [Nadrin/PBR](https://github.com/Nadrin/PBR) @ `cd61a5d5` (MIT, `COPYING.txt`; Cerberus by Andrew Maximov; `environment.hdr` from HDRLabs sIBL, CC-BY-NC-SA 3.0) |
 | D3D12-only build script (no Vulkan SDK) | `build_pbr.bat` |
 | Cerberus → trainer data prep | `prep_cerberus.py` |
+| Direct-BC1 classic baseline (regenerable, gitignored) | `make_classic_bc1.py` → `PBR/data/textures_bc1/` |
 | Trained run → renderer install | `export_to_renderer.py` |
+
+`PBR/build/` and `PBR/data/textures_bc1/` are gitignored (compiled output and
+regenerable data); everything else in `Research/PBR/`, including our renderer
+modifications and the installed neural model in `PBR/data/neural/`, is committed.
 
 ## Pipeline
 
