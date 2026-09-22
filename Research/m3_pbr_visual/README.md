@@ -14,8 +14,8 @@ drivers, a preview Agility SDK and Developer Mode.
 
 | Piece | Where |
 |---|---|
-| Renderer clone (gitignored, modified in place) | `Research/PBR/` |
-| Our modifications as a patch | `pbr_neural.patch` (regenerate: `git -C ../PBR diff > pbr_neural.patch`) |
+| Renderer clone (gitignored, modified in place) | `Research/PBR/` — upstream `Nadrin/PBR` @ `cd61a5d5` |
+| Our modifications as a patch | `pbr_neural.patch` (apply: `git -C ../PBR apply ../m3_pbr_visual/pbr_neural.patch`; regenerate: `git -C ../PBR diff > pbr_neural.patch`) |
 | D3D12-only build script (no Vulkan SDK) | `build_pbr.bat` |
 | Cerberus → trainer data prep | `prep_cerberus.py` |
 | Trained run → renderer install | `export_to_renderer.py` |
