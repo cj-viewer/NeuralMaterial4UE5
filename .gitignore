@@ -23,6 +23,8 @@ Research/m0_float_latent_baseline/data/
 # Third-party reference checkouts (see Research/README.md)
 Research/TextureSetNeuralCompressionSample/
 Research/neural-compression-textures/
+Research/PBR/
+Research/m3_pbr_visual/data/
 
 # OS files
 .DS_Store

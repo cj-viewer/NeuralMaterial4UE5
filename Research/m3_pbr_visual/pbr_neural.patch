@@ -1,0 +1,603 @@
+diff --git a/data/shaders/hlsl/pbr.hlsl b/data/shaders/hlsl/pbr.hlsl
+index 2db3863..2aadd00 100644
+--- a/data/shaders/hlsl/pbr.hlsl
++++ b/data/shaders/hlsl/pbr.hlsl
+@@ -28,6 +28,16 @@ cbuffer ShadingConstants : register(b0)
+ 		float3 radiance;
+ 	} lights[NumLights];
+ 	float3 eyePosition;
++	float materialMode; // packed into eyePosition.w: 0=classic, 1=neural, 2=B/W difference
++};
++
++static const float DiffAmplify = 8.0;
++
++// Neural material: 4 BC1 latent textures + 12->32->9 MLP (NeuralMaterial4UE5 M1/M2 export).
++// Weight layout in the packed float stream: w0[32][12] | b0[32] | w1[9][32] | b1[9].
++cbuffer NeuralWeights : register(b1)
++{
++	float4 neuralWeights[179]; // 716 floats (713 used + padding)
+ };
+ 
+ struct VertexShaderInput
+@@ -54,6 +64,11 @@ TextureCube specularTexture : register(t4);
+ TextureCube irradianceTexture : register(t5);
+ Texture2D specularBRDF_LUT : register(t6);
+ 
++Texture2D latentTexture0 : register(t7);
++Texture2D latentTexture1 : register(t8);
++Texture2D latentTexture2 : register(t9);
++Texture2D latentTexture3 : register(t10);
++
+ SamplerState defaultSampler : register(s0);
+ SamplerState spBRDF_Sampler : register(s1);
+ 
+@@ -88,6 +103,64 @@ float3 fresnelSchlick(float3 F0, float cosTheta)
+ 	return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+ }
+ 
++float neuralWeight(uint i)
++{
++	return neuralWeights[i >> 2][i & 3];
++}
++
++float srgbToLinear(float c)
++{
++	return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
++}
++
++// Evaluate the neural material: sample the 4 BC1 latent mip chains with the
++// ordinary hardware sampler (decode + trilinear/aniso happen in the texture
++// unit, exactly as trained), then run the 12->32->9 FMA MLP.
++// Outputs (storage space): 0-2 basecolor sRGB, 3-5 normal, 6 AO, 7 roughness, 8 metallic.
++void neuralMaterial(float2 uv, out float3 albedo, out float3 tangentNormal,
++                    out float ao, out float roughness, out float metalness)
++{
++	float x[12];
++	float3 f0 = latentTexture0.Sample(defaultSampler, uv).rgb;
++	float3 f1 = latentTexture1.Sample(defaultSampler, uv).rgb;
++	float3 f2 = latentTexture2.Sample(defaultSampler, uv).rgb;
++	float3 f3 = latentTexture3.Sample(defaultSampler, uv).rgb;
++	x[0] = f0.r; x[1]  = f0.g; x[2]  = f0.b;
++	x[3] = f1.r; x[4]  = f1.g; x[5]  = f1.b;
++	x[6] = f2.r; x[7]  = f2.g; x[8]  = f2.b;
++	x[9] = f3.r; x[10] = f3.g; x[11] = f3.b;
++
++	float hidden[32];
++	[unroll]
++	for(uint j = 0; j < 32; ++j) {
++		float v = neuralWeight(384 + j); // b0
++		[unroll]
++		for(uint i = 0; i < 12; ++i) {
++			v = mad(x[i], neuralWeight(j * 12 + i), v); // w0
++		}
++		hidden[j] = max(v, 0.0);
++	}
++
++	float y[9];
++	[unroll]
++	for(uint o = 0; o < 9; ++o) {
++		float v = neuralWeight(704 + o); // b1
++		[unroll]
++		for(uint j = 0; j < 32; ++j) {
++			v = mad(hidden[j], neuralWeight(416 + o * 32 + j), v); // w1
++		}
++		y[o] = v;
++	}
++
++	// The MLP reproduces storage-space texture values; convert exactly like the
++	// classic path does (albedo texture is an sRGB view, normal is *2-1).
++	albedo = float3(srgbToLinear(saturate(y[0])), srgbToLinear(saturate(y[1])), srgbToLinear(saturate(y[2])));
++	tangentNormal = 2.0 * saturate(float3(y[3], y[4], y[5])) - 1.0;
++	ao = saturate(y[6]);
++	roughness = saturate(y[7]);
++	metalness = saturate(y[8]);
++}
++
+ // Returns number of mipmap levels for specular IBL environment map.
+ uint querySpecularTextureLevels()
+ {
+@@ -112,19 +185,25 @@ PixelShaderInput main_vs(VertexShaderInput vin)
+ 	return vout;
+ }
+ 
+-// Pixel shader
+-float4 main_ps(PixelShaderInput pin) : SV_Target
++void classicMaterial(float2 uv, out float3 albedo, out float3 tangentNormal,
++                     out float ao, out float roughness, out float metalness)
+ {
+-	// Sample input textures to get shading model params.
+-	float3 albedo = albedoTexture.Sample(defaultSampler, pin.texcoord).rgb;
+-	float metalness = metalnessTexture.Sample(defaultSampler, pin.texcoord).r;
+-	float roughness = roughnessTexture.Sample(defaultSampler, pin.texcoord).r;
++	albedo = albedoTexture.Sample(defaultSampler, uv).rgb;
++	metalness = metalnessTexture.Sample(defaultSampler, uv).r;
++	roughness = roughnessTexture.Sample(defaultSampler, uv).r;
++	tangentNormal = 2.0 * normalTexture.Sample(defaultSampler, uv).rgb - 1.0;
++	ao = 1.0; // the Cerberus set has no AO map
++}
+ 
++// Full shading (direct + IBL) for one set of material parameters.
++float3 shade(PixelShaderInput pin, float3 albedo, float3 tangentNormal,
++             float ao, float roughness, float metalness)
++{
+ 	// Outgoing light direction (vector from world-space fragment position to the "eye").
+ 	float3 Lo = normalize(eyePosition - pin.position);
+ 
+ 	// Get current fragment's normal and transform to world space.
+-	float3 N = normalize(2.0 * normalTexture.Sample(defaultSampler, pin.texcoord).rgb - 1.0);
++	float3 N = normalize(tangentNormal);
+ 	N = normalize(mul(pin.tangentBasis, N));
+ 	
+ 	// Angle between surface normal and outgoing light direction.
+@@ -202,10 +281,36 @@ float4 main_ps(PixelShaderInput pin) : SV_Target
+ 		// Total specular IBL contribution.
+ 		float3 specularIBL = (F0 * specularBRDF.x + specularBRDF.y) * specularIrradiance;
+ 
+-		// Total ambient lighting contribution.
+-		ambientLighting = diffuseIBL + specularIBL;
++		// Total ambient lighting contribution (AO comes from the neural output;
++		// the classic Cerberus set has no AO map, so ao == 1 on that path).
++		ambientLighting = (diffuseIBL + specularIBL) * ao;
+ 	}
+ 
+-	// Final fragment color.
+-	return float4(directLighting + ambientLighting, 1.0);
++	return directLighting + ambientLighting;
++}
++
++// Pixel shader
++float4 main_ps(PixelShaderInput pin) : SV_Target
++{
++	float3 albedo, tangentNormal;
++	float ao, roughness, metalness;
++
++	if(materialMode > 1.5) {
++		// B/W difference mode: shade both material paths and output the
++		// amplified luminance of the absolute difference (pre-tonemap).
++		classicMaterial(pin.texcoord, albedo, tangentNormal, ao, roughness, metalness);
++		float3 classicColor = shade(pin, albedo, tangentNormal, ao, roughness, metalness);
++		neuralMaterial(pin.texcoord, albedo, tangentNormal, ao, roughness, metalness);
++		float3 neuralColor = shade(pin, albedo, tangentNormal, ao, roughness, metalness);
++		float g = dot(abs(neuralColor - classicColor), float3(0.299, 0.587, 0.114)) * DiffAmplify;
++		return float4(g, g, g, 1.0);
++	}
++
++	if(materialMode > 0.5) {
++		neuralMaterial(pin.texcoord, albedo, tangentNormal, ao, roughness, metalness);
++	}
++	else {
++		classicMaterial(pin.texcoord, albedo, tangentNormal, ao, roughness, metalness);
++	}
++	return float4(shade(pin, albedo, tangentNormal, ao, roughness, metalness), 1.0);
+ }
+diff --git a/src/common/application.cpp b/src/common/application.cpp
+index 8d9b7a5..3280a2c 100644
+--- a/src/common/application.cpp
++++ b/src/common/application.cpp
+@@ -3,14 +3,15 @@
+  * Copyright (c) 2017-2018 Michał Siejak
+  */
+ 
++#include <cstdio>
+ #include <stdexcept>
+ #include <GLFW/glfw3.h>
+ 
+ #include "application.hpp"
+ 
+ namespace {
+-	const int DisplaySizeX = 1024;
+-	const int DisplaySizeY = 1024;
++	const int DisplaySizeX = 1920;
++	const int DisplaySizeY = 1080;
+ 	const int DisplaySamples = 16;
+ 
+ 	const float ViewDistance = 150.0f;
+@@ -150,5 +151,18 @@ void Application::keyCallback(GLFWwindow* window, int key, int scancode, int act
+ 		if(light) {
+ 			light->enabled = !light->enabled;
+ 		}
++
++		int& mode = self->m_sceneSettings.materialMode;
++		if(key == GLFW_KEY_N) {
++			mode = (mode == 1) ? 0 : 1;
++		}
++		if(key == GLFW_KEY_D) {
++			mode = (mode == 2) ? 1 : 2;
++		}
++		if(key == GLFW_KEY_N || key == GLFW_KEY_D) {
++			static const char* names[] = { "classic textures", "neural material", "B/W difference" };
++			std::printf("Material mode: %s\n", names[mode]);
++			std::fflush(stdout);
++		}
+ 	}
+ }
+diff --git a/src/common/mesh.cpp b/src/common/mesh.cpp
+index 6ba1ca8..504a672 100644
+--- a/src/common/mesh.cpp
++++ b/src/common/mesh.cpp
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <cstdio>
++#include <stdexcept>
+ #include <assimp/scene.h>
+ #include <assimp/postprocess.h>
+ #include <assimp/Importer.hpp>
+diff --git a/src/common/renderer.hpp b/src/common/renderer.hpp
+index 1659897..4c6fab6 100644
+--- a/src/common/renderer.hpp
++++ b/src/common/renderer.hpp
+@@ -27,6 +27,11 @@ struct SceneSettings
+ 		glm::vec3 radiance;
+ 		bool enabled = false;
+ 	} lights[NumLights];
++
++	// 0=classic textures, 1=neural material, 2=B/W difference (classic vs neural).
++	// N toggles 0<->1, D toggles the difference view. Forced to 0 when no
++	// neural assets are loaded.
++	int materialMode = 1;
+ };
+ 
+ class RendererInterface
+diff --git a/src/d3d12.cpp b/src/d3d12.cpp
+index 38d353e..9e63c69 100644
+--- a/src/d3d12.cpp
++++ b/src/d3d12.cpp
+@@ -8,6 +8,9 @@
+ #if defined(ENABLE_D3D12)
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
+ #include <stdexcept>
+ 
+ #include <glm/glm.hpp>
+@@ -243,16 +246,20 @@ void Renderer::setup()
+ 		const CD3DX12_DESCRIPTOR_RANGE1 descriptorRanges[] = {
+ 			{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC},
+ 			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC},
++			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 7, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC}, // neural latents t7-t10
++			{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC}, // neural weights b1
+ 		};
+-		CD3DX12_ROOT_PARAMETER1 rootParameters[3];
++		CD3DX12_ROOT_PARAMETER1 rootParameters[5];
+ 		rootParameters[0].InitAsDescriptorTable(1, &descriptorRanges[0], D3D12_SHADER_VISIBILITY_VERTEX);
+ 		rootParameters[1].InitAsDescriptorTable(1, &descriptorRanges[0], D3D12_SHADER_VISIBILITY_PIXEL);
+ 		rootParameters[2].InitAsDescriptorTable(1, &descriptorRanges[1], D3D12_SHADER_VISIBILITY_PIXEL);
++		rootParameters[3].InitAsDescriptorTable(1, &descriptorRanges[2], D3D12_SHADER_VISIBILITY_PIXEL);
++		rootParameters[4].InitAsDescriptorTable(1, &descriptorRanges[3], D3D12_SHADER_VISIBILITY_PIXEL);
+ 		D3D12_STATIC_SAMPLER_DESC staticSamplers[2];
+ 		staticSamplers[0] = defaultSamplerDesc;
+ 		staticSamplers[1] = spBRDF_SamplerDesc;
+ 		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC signatureDesc;
+-		signatureDesc.Init_1_1(3, rootParameters, 2, staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
++		signatureDesc.Init_1_1(5, rootParameters, 2, staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+ 		m_pbrRootSignature = createRootSignature(signatureDesc);
+ 
+ 		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+@@ -279,10 +286,27 @@ void Renderer::setup()
+ 	// Load PBR model assets.
+ 	m_pbrModel = createMeshBuffer(Mesh::fromFile("meshes/cerberus.fbx"));
+ 
+-	m_albedoTexture = createTexture(Image::fromFile("textures/cerberus_A.png"), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+-	m_normalTexture = createTexture(Image::fromFile("textures/cerberus_N.png"), DXGI_FORMAT_R8G8B8A8_UNORM);
+-	m_metalnessTexture = createTexture(Image::fromFile("textures/cerberus_M.png", 1), DXGI_FORMAT_R8_UNORM);
+-	m_roughnessTexture = createTexture(Image::fromFile("textures/cerberus_R.png", 1), DXGI_FORMAT_R8_UNORM);
++	// Classic material path: prefer the 1024^2 direct-BC1 mip chains (fair
++	// baseline against the neural latents, see m3_pbr_visual/make_classic_bc1.py);
++	// fall back to the original full-resolution PNGs when absent.
++	const bool haveClassicBC1 = std::ifstream("textures_bc1/albedo.dds").good()
++		&& std::ifstream("textures_bc1/normal.dds").good()
++		&& std::ifstream("textures_bc1/metalness.dds").good()
++		&& std::ifstream("textures_bc1/roughness.dds").good();
++	if(haveClassicBC1) {
++		m_albedoTexture = createTextureFromBC1DDS("textures_bc1/albedo.dds", true);
++		m_normalTexture = createTextureFromBC1DDS("textures_bc1/normal.dds");
++		m_metalnessTexture = createTextureFromBC1DDS("textures_bc1/metalness.dds");
++		m_roughnessTexture = createTextureFromBC1DDS("textures_bc1/roughness.dds");
++		std::printf("Classic maps: direct-BC1 1024^2 mip chains (textures_bc1/).\n");
++		std::fflush(stdout);
++	}
++	else {
++		m_albedoTexture = createTexture(Image::fromFile("textures/cerberus_A.png"), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++		m_normalTexture = createTexture(Image::fromFile("textures/cerberus_N.png"), DXGI_FORMAT_R8G8B8A8_UNORM);
++		m_metalnessTexture = createTexture(Image::fromFile("textures/cerberus_M.png", 1), DXGI_FORMAT_R8_UNORM);
++		m_roughnessTexture = createTexture(Image::fromFile("textures/cerberus_R.png", 1), DXGI_FORMAT_R8_UNORM);
++	}
+ 
+ 	// Create root signature & pipeline configuration for rendering skybox.
+ 	{
+@@ -514,13 +538,54 @@ void Renderer::setup()
+ 		m_commandList->ResourceBarrier(NumFrames, barriers.data());
+ 	}
+ 
++	// Neural material assets (optional; toggled with the N key when present).
++	// Must run after m_constantBuffer exists: the weights CBV allocates from it.
++	loadNeuralMaterial();
++
++	// Stats: material texture VRAM (classic maps vs neural latents + weights)
++	// and a timestamp query pair around the PBR draw, double-buffered per frame.
++	{
++		m_classicTextureBytes = textureAllocationBytes(m_albedoTexture)
++			+ textureAllocationBytes(m_normalTexture)
++			+ textureAllocationBytes(m_metalnessTexture)
++			+ textureAllocationBytes(m_roughnessTexture);
++		if(m_neuralAvailable) {
++			for(const Texture& latent : m_latentTextures) {
++				m_neuralTextureBytes += textureAllocationBytes(latent);
++			}
++			m_neuralTextureBytes += 716 * sizeof(float); // MLP weights CBV
++		}
++
++		D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
++		queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++		queryHeapDesc.Count = NumFrames * 2;
++		if(FAILED(m_device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&m_timestampQueryHeap)))) {
++			throw std::runtime_error("Failed to create timestamp query heap");
++		}
++		if(FAILED(m_device->CreateCommittedResource(
++			&CD3DX12_HEAP_PROPERTIES{D3D12_HEAP_TYPE_READBACK},
++			D3D12_HEAP_FLAG_NONE,
++			&CD3DX12_RESOURCE_DESC::Buffer(NumFrames * 2 * sizeof(UINT64)),
++			D3D12_RESOURCE_STATE_COPY_DEST,
++			nullptr,
++			IID_PPV_ARGS(&m_timestampReadback))))
++		{
++			throw std::runtime_error("Failed to create timestamp readback buffer");
++		}
++		m_commandQueue->GetTimestampFrequency(&m_timestampFrequency);
++	}
++
+ 	executeCommandList(false);
+ 	waitForGPU();
+ }
+ 
+ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneSettings& scene)
+ {
+-	const glm::mat4 projectionMatrix = glm::perspectiveFov(view.fov, float(1024), float(1024), 1.0f, 1000.0f);
++	// Match the projection aspect to the actual framebuffer size (the original
++	// code hardcoded the 1024x1024 window).
++	int fbWidth = 0, fbHeight = 0;
++	glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
++	const glm::mat4 projectionMatrix = glm::perspectiveFov(view.fov, float(fbWidth > 0 ? fbWidth : 1920), float(fbHeight > 0 ? fbHeight : 1080), 1.0f, 1000.0f);
+ 	const glm::mat4 viewRotationMatrix = glm::eulerAngleXY(glm::radians(view.pitch), glm::radians(view.yaw));
+ 	const glm::mat4 sceneRotationMatrix = glm::eulerAngleXY(glm::radians(scene.pitch), glm::radians(scene.yaw));
+ 	const glm::mat4 viewMatrix = glm::translate(glm::mat4{ 1.0f }, { 0.0f, 0.0f, -view.distance }) * viewRotationMatrix;
+@@ -539,8 +604,11 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
+ 	
+ 	// Update shading constant buffer (for pixel shader).
+ 	{
++		// Material mode comes from the application key callbacks (N/D keys);
++		// it travels to the pixel shader in eyePosition.w (0/1/2).
+ 		ShadingCB* shadingConstants = shadingCBV.as<ShadingCB>();
+-		shadingConstants->eyePosition = glm::vec4{eyePosition, 0.0f};
++		const int materialMode = m_neuralAvailable ? scene.materialMode : 0;
++		shadingConstants->eyePosition = glm::vec4{eyePosition, float(materialMode)};
+ 		for(int i=0; i<SceneSettings::NumLights; ++i) {
+ 			const SceneSettings::Light& light = scene.lights[i];
+ 			shadingConstants->lights[i].direction = glm::vec4{light.direction, 0.0f};
+@@ -553,6 +621,33 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
+ 		}
+ 	}
+ 
++	// Read back the PBR-pass timestamps this frame slot resolved on its
++	// previous (fence-completed) submission, and refresh the title-bar stats.
++	{
++		const D3D12_RANGE readRange{ m_frameIndex * 2 * sizeof(UINT64), (m_frameIndex * 2 + 2) * sizeof(UINT64) };
++		void* mapped;
++		if(SUCCEEDED(m_timestampReadback->Map(0, &readRange, &mapped))) {
++			const UINT64* stamps = reinterpret_cast<const UINT64*>(mapped) + m_frameIndex * 2;
++			if(m_timestampFrequency > 0 && stamps[1] > stamps[0]) {
++				const double ms = double(stamps[1] - stamps[0]) * 1000.0 / double(m_timestampFrequency);
++				m_pbrPassMs = (m_pbrPassMs == 0.0) ? ms : m_pbrPassMs * 0.9 + ms * 0.1;
++			}
++			const D3D12_RANGE emptyRange{0, 0};
++			m_timestampReadback->Unmap(0, &emptyRange);
++		}
++		if(++m_titleUpdateCounter >= 20) {
++			m_titleUpdateCounter = 0;
++			static const char* modeNames[] = { "classic", "neural", "diff B/W x8" };
++			const int mode = m_neuralAvailable ? scene.materialMode : 0;
++			char title[256];
++			std::snprintf(title, sizeof(title),
++				"PBR (Direct3D 12) | mode: %s | material VRAM: classic %.1f MB / neural %.2f MB | PBR pass: %.3f ms",
++				modeNames[mode], m_classicTextureBytes / (1024.0 * 1024.0),
++				m_neuralTextureBytes / (1024.0 * 1024.0), m_pbrPassMs);
++			glfwSetWindowTitle(window, title);
++		}
++	}
++
+ 	ID3D12CommandAllocator* commandAllocator = m_commandAllocators[m_frameIndex].Get();
+ 	const SwapChainBuffer& backbuffer = m_backbuffers[m_frameIndex];
+ 	const FrameBuffer& framebuffer = m_framebuffers[m_frameIndex];
+@@ -592,18 +687,26 @@ void Renderer::render(GLFWwindow* window, const ViewSettings& view, const SceneS
+ 		m_commandList->DrawIndexedInstanced(m_skybox.numElements, 1, 0, 0, 0);
+ 	}
+ 
+-	// Draw PBR model.
++	// Draw PBR model (bracketed by timestamp queries for the stats overlay).
+ 	{
+ 		m_commandList->SetGraphicsRootSignature(m_pbrRootSignature.Get());
+ 		m_commandList->SetGraphicsRootDescriptorTable(0, transformCBV.cbv.gpuHandle);
+ 		m_commandList->SetGraphicsRootDescriptorTable(1, shadingCBV.cbv.gpuHandle);
+ 		m_commandList->SetGraphicsRootDescriptorTable(2, m_albedoTexture.srv.gpuHandle);
++		if(m_neuralAvailable) {
++			m_commandList->SetGraphicsRootDescriptorTable(3, m_latentTextures[0].srv.gpuHandle);
++			m_commandList->SetGraphicsRootDescriptorTable(4, m_neuralWeightsCBV.cbv.gpuHandle);
++		}
+ 		m_commandList->SetPipelineState(m_pbrPipelineState.Get());
+ 
+ 		m_commandList->IASetVertexBuffers(0, 1, &m_pbrModel.vbv);
+ 		m_commandList->IASetIndexBuffer(&m_pbrModel.ibv);
+ 
++		m_commandList->EndQuery(m_timestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, m_frameIndex * 2);
+ 		m_commandList->DrawIndexedInstanced(m_pbrModel.numElements, 1, 0, 0, 0);
++		m_commandList->EndQuery(m_timestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, m_frameIndex * 2 + 1);
++		m_commandList->ResolveQueryData(m_timestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++			m_frameIndex * 2, 2, m_timestampReadback.Get(), m_frameIndex * 2 * sizeof(UINT64));
+ 	}
+ 
+ 	// Resolve multisample framebuffer (MSAA) or transition into pixel shader resource state (non-MSAA).
+@@ -760,8 +863,10 @@ StagingBuffer Renderer::createStagingBuffer(const ComPtr<ID3D12Resource>& resour
+ 	const D3D12_RESOURCE_DESC resourceDesc = resource->GetDesc();
+ 
+ 	UINT64 numBytesTotal;
+-	std::vector<UINT> numRows{numSubresources};
+-	std::vector<UINT64> rowBytes{numSubresources};
++	// Parenthesized size ctor: brace-init would create a single-element vector
++	// and GetCopyableFootprints then overflows it for numSubresources > 1.
++	std::vector<UINT> numRows(numSubresources);
++	std::vector<UINT64> rowBytes(numSubresources);
+ 	m_device->GetCopyableFootprints(&resourceDesc, firstSubresource, numSubresources, 0, stagingBuffer.layouts.data(), numRows.data(), rowBytes.data(), &numBytesTotal);
+ 
+ 	if(FAILED(m_device->CreateCommittedResource(
+@@ -872,6 +977,113 @@ Texture Renderer::createTexture(const std::shared_ptr<Image>& image, DXGI_FORMAT
+ 	return texture;
+ }
+ 
++UINT64 Renderer::textureAllocationBytes(const Texture& texture) const
++{
++	if(!texture.texture) {
++		return 0;
++	}
++	const D3D12_RESOURCE_DESC desc = texture.texture->GetDesc();
++	return m_device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
++}
++
++Texture Renderer::createTextureFromBC1DDS(const std::string& filename, bool srgb)
++{
++	// Loads the minimal DDS files written by Research/m1_differentiable_bc1/bc1.py
++	// (DXT1 FourCC, full mip chain down to 4x4, no partial blocks).
++	std::ifstream file{filename, std::ios::binary | std::ios::ate};
++	if(!file.is_open()) {
++		throw std::runtime_error("Could not open DDS file: " + filename);
++	}
++	const std::streamsize size = file.tellg();
++	std::vector<char> blob(static_cast<size_t>(size));
++	file.seekg(0);
++	file.read(blob.data(), size);
++
++	if(size < 128 || std::memcmp(blob.data(), "DDS ", 4) != 0 || std::memcmp(blob.data() + 84, "DXT1", 4) != 0) {
++		throw std::runtime_error("Not a DXT1 DDS file: " + filename);
++	}
++	const UINT height = *reinterpret_cast<const UINT*>(blob.data() + 12);
++	const UINT width = *reinterpret_cast<const UINT*>(blob.data() + 16);
++	const UINT mipCount = std::max(1u, *reinterpret_cast<const UINT*>(blob.data() + 28));
++
++	Texture texture;
++	texture.width = width;
++	texture.height = height;
++	texture.levels = mipCount;
++
++	D3D12_RESOURCE_DESC desc = {};
++	desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++	desc.Width = width;
++	desc.Height = height;
++	desc.DepthOrArraySize = 1;
++	desc.MipLevels = static_cast<UINT16>(mipCount);
++	desc.Format = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM;
++	desc.SampleDesc.Count = 1;
++	if(FAILED(m_device->CreateCommittedResource(
++		&CD3DX12_HEAP_PROPERTIES{D3D12_HEAP_TYPE_DEFAULT},
++		D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
++		nullptr, IID_PPV_ARGS(&texture.texture))))
++	{
++		throw std::runtime_error("Failed to create BC1 texture: " + filename);
++	}
++
++	std::vector<D3D12_SUBRESOURCE_DATA> subresources(mipCount);
++	const char* src = blob.data() + 128;
++	for(UINT level = 0; level < mipCount; ++level) {
++		const UINT levelWidth = std::max(4u, width >> level);
++		const UINT levelHeight = std::max(4u, height >> level);
++		const UINT rowPitch = (levelWidth / 4) * 8;
++		subresources[level] = { src, static_cast<LONG_PTR>(rowPitch), static_cast<LONG_PTR>(rowPitch * (levelHeight / 4)) };
++		src += rowPitch * (levelHeight / 4);
++	}
++
++	StagingBuffer staging = createStagingBuffer(texture.texture, 0, mipCount, subresources.data());
++	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(texture.texture.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
++	for(UINT level = 0; level < mipCount; ++level) {
++		const CD3DX12_TEXTURE_COPY_LOCATION dest{texture.texture.Get(), level};
++		const CD3DX12_TEXTURE_COPY_LOCATION source{staging.buffer.Get(), staging.layouts[level]};
++		m_commandList->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
++	}
++	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(texture.texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
++	executeCommandList();
++	waitForGPU();
++
++	createTextureSRV(texture, D3D12_SRV_DIMENSION_TEXTURE2D);
++	return texture;
++}
++
++void Renderer::loadNeuralMaterial()
++{
++	// Expects data/neural/{latent0..3.dds, weights.bin}; produced by
++	// Research/m3_pbr_visual/export_to_renderer.py. Optional: absence just
++	// leaves the classic texture path active.
++	try {
++		for(int i = 0; i < 4; ++i) {
++			m_latentTextures[i] = createTextureFromBC1DDS("neural/latent" + std::to_string(i) + ".dds");
++		}
++		std::ifstream file{"neural/weights.bin", std::ios::binary | std::ios::ate};
++		if(!file.is_open()) {
++			throw std::runtime_error("Could not open neural/weights.bin");
++		}
++		const std::streamsize size = file.tellg();
++		if(size != 716 * sizeof(float)) {
++			throw std::runtime_error("neural/weights.bin has unexpected size");
++		}
++		std::vector<float> weights(716);
++		file.seekg(0);
++		file.read(reinterpret_cast<char*>(weights.data()), size);
++		m_neuralWeightsCBV = createConstantBufferView(weights.data(), static_cast<UINT>(size));
++
++		m_neuralAvailable = true;
++		std::printf("Neural material loaded (4 BC1 latent mip chains + 12-32-9 MLP). Press N to toggle.\n");
++		std::fflush(stdout);
++	}
++	catch(const std::exception& e) {
++		std::printf("Neural material not loaded (%s); classic textures only.\n", e.what());
++		m_neuralAvailable = false;
++	}
++}
++
+ void Renderer::generateMipmaps(const Texture& texture)
+ {
+ 	assert(texture.width == texture.height);
+diff --git a/src/d3d12.hpp b/src/d3d12.hpp
+index 4d611f2..8e70642 100644
+--- a/src/d3d12.hpp
++++ b/src/d3d12.hpp
+@@ -154,6 +154,8 @@ private:
+ 
+ 	Texture createTexture(UINT width, UINT height, UINT depth, DXGI_FORMAT format, UINT levels=0);
+ 	Texture createTexture(const std::shared_ptr<class Image>& image, DXGI_FORMAT format, UINT levels=0);
++	Texture createTextureFromBC1DDS(const std::string& filename, bool srgb = false);
++	void loadNeuralMaterial();
+ 	void generateMipmaps(const Texture& texture);
+ 
+ 	void createTextureSRV(Texture& texture, D3D12_SRV_DIMENSION dimension, UINT mostDetailedMip=0, UINT mipLevels=0);
+@@ -211,6 +213,21 @@ private:
+ 	Texture m_metalnessTexture;
+ 	Texture m_roughnessTexture;
+ 
++	// Neural material (4 BC1 latent mip chains + MLP weights, see Research/m3_pbr_visual).
++	Texture m_latentTextures[4];
++	ConstantBufferView m_neuralWeightsCBV;
++	bool m_neuralAvailable = false;
++
++	// Stats overlay (window title): material texture VRAM + PBR pass GPU time.
++	ComPtr<ID3D12QueryHeap> m_timestampQueryHeap;
++	ComPtr<ID3D12Resource> m_timestampReadback;
++	UINT64 m_timestampFrequency = 0;
++	double m_pbrPassMs = 0.0;
++	UINT64 m_classicTextureBytes = 0;
++	UINT64 m_neuralTextureBytes = 0;
++	int m_titleUpdateCounter = 0;
++	UINT64 textureAllocationBytes(const Texture& texture) const;
++
+ 	Texture m_envTexture;
+ 	Texture m_irmapTexture;
+ 	Texture m_spBRDF_LUT;
