@@ -8,6 +8,12 @@
 
 struct GLFWwindow;
 
+// Material package directory (trainer output: classic BC1 maps + neural
+// latents/weights in one folder), relative to the data/ working directory or
+// absolute. Set from the -material command line argument.
+#include <string>
+extern std::string g_materialDir;
+
 struct ViewSettings
 {
 	float pitch = 0.0f;

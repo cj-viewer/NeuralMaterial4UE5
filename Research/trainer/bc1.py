@@ -195,3 +195,33 @@ def write_dds_mips(path, levels: list[np.ndarray], height: int, width: int) -> N
         with open(path, "wb") as f:
             f.write(header)
             f.write(payload)
+
+
+# ---------------------------------------------------------------------------
+# Offline PCA-fit BC1 encoder: encode an arbitrary image (e.g. a classic map
+# for the renderer baseline) as BC1 block parameters. Not used in training.
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def boxfit_bc1_params(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """image [1,3,H,W] in [0,1] -> (e0, e1, w) block params via per-block PCA:
+    endpoints are the extreme projections onto the principal color axis.
+    (Per-channel min/max endpoints are wrong for anti-correlated channels --
+    the AABB corners are not on the color segment.)"""
+    _, c, h, w = image.shape
+    bh, bw = h // 4, w // 4
+    blocks = image[0].reshape(c, bh, 4, bw, 4).permute(1, 3, 2, 4, 0)  # [bh,bw,4,4,3]
+    flat = blocks.reshape(bh, bw, 16, 3)
+    mean = flat.mean(dim=2, keepdim=True)
+    x = (flat - mean).double()
+    cov = x.transpose(-1, -2) @ x  # [bh,bw,3,3]
+    _, vecs = torch.linalg.eigh(cov)
+    d = vecs[..., -1]  # principal axis [bh,bw,3]
+    t = (x @ d.unsqueeze(-1))[..., 0]  # [bh,bw,16]
+    tmin = t.min(dim=2, keepdim=True).values
+    tmax = t.max(dim=2, keepdim=True).values
+    e0 = (mean[..., 0, :] + d * tmin).clamp(0.0, 1.0).to(image.dtype)
+    e1 = (mean[..., 0, :] + d * tmax).clamp(0.0, 1.0).to(image.dtype)
+    wmap = ((t - tmin) / (tmax - tmin).clamp_min(1e-12)).clamp(0.0, 1.0).to(image.dtype)
+    wmap = wmap.reshape(bh, bw, 4, 4).permute(0, 2, 1, 3).reshape(h, w)
+    return e0, e1, wmap

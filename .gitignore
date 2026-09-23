@@ -18,17 +18,16 @@ __pycache__/
 Research/**/output/
 Research/**/checkpoints/
 Research/**/runs/
-Research/m0_float_latent_baseline/data/
+Research/trainer/data/
 
 # Third-party reference checkouts (see Research/README.md)
 Research/TextureSetNeuralCompressionSample/
 Research/neural-compression-textures/
-Research/m3_pbr_visual/data/
 
 # Vendored PBR test renderer (Research/PBR): committed with our modifications;
-# build artifacts, regenerable BC1 baselines and downloaded SDKs stay out.
+# build artifacts, generated material packages and downloaded SDKs stay out.
 Research/PBR/build/
-Research/PBR/data/textures_bc1/
+Research/PBR/data/material*/
 Research/PBR/external/
 
 # OS files

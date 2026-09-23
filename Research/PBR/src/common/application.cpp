@@ -9,6 +9,8 @@
 
 #include "application.hpp"
 
+std::string g_materialDir = "material";
+
 namespace {
 	const int DisplaySizeX = 1920;
 	const int DisplaySizeY = 1080;

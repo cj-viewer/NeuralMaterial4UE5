@@ -2,7 +2,7 @@
 (basecolor/normal/ao/roughness/metallic PNGs). AO is constant white — the
 Cerberus set has no AO map and neither does the renderer's shading model.
 
-    .venv/Scripts/python.exe m3_pbr_visual/prep_cerberus.py --res 1024
+    .venv/Scripts/python.exe trainer/prep_cerberus.py --res 4096
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ SRC = HERE.parent / "PBR" / "data" / "textures"
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--res", type=int, default=1024)
+    ap.add_argument("--res", type=int, default=4096)
     a = ap.parse_args()
     out = HERE / "data" / f"cerberus_{a.res}"
     out.mkdir(parents=True, exist_ok=True)

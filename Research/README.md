@@ -1,32 +1,37 @@
-# Research and proof-of-concept workspace
+# Research workspace
 
-Place isolated experiments here. Each experiment should be self-contained, document its inputs and expected output, and avoid becoming a runtime plugin dependency until it has a reproducible validation result.
+神经材质训练与测试。详细参数、数据契约见 `trainer/README.md`。
 
-Shared Python environment: `Research/.venv` (torch cu128 + numpy + pillow), created per
-`m0_float_latent_baseline/requirements.txt`.
+## 一次性准备
 
-## Experiments
+```bat
+trainer\build_pbr.bat                                 :: 构建 D3D12 测试渲染器
+.venv\Scripts\python.exe trainer\prep_cerberus.py     :: 生成 4K Cerberus 训练集
+```
 
-- `m0_float_latent_baseline/` — M0: float latent + MLP reconstruction of one PBR set,
-  with numpy gold fixtures for the later D3D12/UE comparisons. See its README.
-- `m1_differentiable_bc1/` — M1: STE-quantized simulated-BC1 latents, real BC1/DDS
-  exporter with independent-decoder validation, float-vs-BC1 resolution sweep. See its README.
-- `m2_mip_lod/` — M2: independently trained BC1 mip pyramids, continuous-LOD training
-  against box-filtered reference targets, mipped DDS export, naive-mip A/B baseline. See its README.
-- `m3_pbr_visual/` — M3a: the neural material rendered inside a real D3D12 PBR+IBL
-  renderer. The renderer source (based on Nadrin/PBR, MIT) is vendored with our
-  modifications at `Research/PBR/`: hardware BC1 decode + FMA MLP in HLSL, live
-  VRAM/GPU-time stats, N/D toggles vs a direct-BC1 classic baseline. See its README.
+Python 环境：`Research\.venv`（torch cu128 + numpy + pillow）。
 
-Suggested first experiments:
+## 日常三步（任意目录可运行）
 
-1. Python BC1 quantization/decode and exporter fixtures.
-2. 12 -> 32 -> PBR MLP reconstruction using four latent textures.
-3. D3D12/HLSL FMA inference compared against the Python reference.
+```bat
+train.bat --data trainer\data\cerberus_4096 --latent-res 512 --out PBR\data\material
+validate.bat PBR\data\material\export.npz
+test.bat
+```
 
-## Reference checkouts (read-only, not our code)
+- **train.bat** — 训练并输出材质包（经典 BC1 四图 + 神经 latent/权重 + 训练工件）。
+  常用参数：`--data` 源纹理目录（省略则用合成集）、`--latent-res` latent 分辨率
+  （默认 512，2 的幂）、`--out` 材质包输出目录、`--iters`（默认 20000）。
+  带进度条 / 总 iter / ETA。全部参数：`train.bat --help`。
+- **validate.bat** — `--selftest` 跑 8 项管线自测；传入 `<包>\export.npz` 校验
+  训练导出（含从位流独立复现 fixtures）。
+- **test.bat** — 启动渲染器，默认加载 `PBR\data\material`；
+  `test.bat -material <目录>` 换包（相对路径按你的启动目录解析）。
+  按键：`N` 经典↔神经 · `D` 黑白差异 · `C` FMA↔CoopVec · 滚轮/左右键拖动控制相机。
 
-- `TextureSetNeuralCompressionSample/` — Intel's official demo for the Belcour & Benyoub BCF1 paper (MIT). Inference-only: pretrained BC1 latents + MLP models and the D3D12/HLSL inference shaders. Use as the gold reference for the M3 GPU comparison and the training-to-runtime data contract (weight layout, latent binding).
-- `neural-compression-textures/` — unofficial PyTorch reimplementation of NVIDIA's Random-Access Neural Texture Compression (MIT). Different architecture; reference for PyTorch training-loop structure only.
+## 第三方参考（只读，勿提交、勿抄代码未查许可证）
 
-Both keep their own `.git` and upstream license; do not commit them into this repository or copy code from them without checking the license.
+`TextureSetNeuralCompressionSample/`（Intel BCF1 官方 demo）、
+`neural-compression-textures/`（NVIDIA NTC 非官方复现）。
+
+里程碑实验（m0–m3）已整合进 `trainer/`，历史代码见 git（最后存在于 `f58b2ca`）。

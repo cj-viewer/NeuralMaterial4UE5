@@ -1,5 +1,0 @@
-# install torch from the cu128 index for Blackwell GPUs (RTX 50xx):
-#   pip install torch --index-url https://download.pytorch.org/whl/cu128
-torch
-numpy
-pillow

@@ -8,9 +8,15 @@
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <memory>
 #include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include "application.hpp"
 
@@ -40,7 +46,12 @@ static void printUsage(const char* argv0)
 	for(size_t i=0; i<flags.size(); ++i) {
 		std::fprintf(stderr, "%s%s", flags[i], i < (flags.size()-1) ? "|":"");
 	}
-	std::fprintf(stderr, "]\n");
+	std::fprintf(stderr, "] [-datadir <dir>] [-material <dir>]\n");
+	std::fprintf(stderr, "  -datadir   Renderer asset root (the PBR/data folder). The process\n"
+	                     "             chdirs there, so the exe can be launched from anywhere.\n");
+	std::fprintf(stderr, "  -material  Material package folder (trainer output): classic BC1 maps\n"
+	                     "             + neural latents/weights. Resolved against the launch\n"
+	                     "             directory when given; default \"material\" inside datadir.\n");
 }
 
 static RendererInterface* createDefaultRenderer()
@@ -84,17 +95,45 @@ static RendererInterface* createNamedRenderer(const std::string& flag)
 int main(int argc, char* argv[])
 {
 	RendererInterface* renderer = nullptr;
+	std::string dataDir;
+	bool materialSet = false;
 
-	if(argc < 2) {
-		renderer = createDefaultRenderer();
-	}
-	else {
-		renderer = createNamedRenderer(argv[1]);
-		if(!renderer) {
-			printUsage(argv[0]);
-			return 1;
+	for(int i=1; i<argc; ++i) {
+		const std::string arg = argv[i];
+		if(arg == "-material" && i + 1 < argc) {
+			g_materialDir = argv[++i];
+			materialSet = true;
+		}
+		else if(arg == "-datadir" && i + 1 < argc) {
+			dataDir = argv[++i];
+		}
+		else {
+			renderer = createNamedRenderer(arg);
+			if(!renderer) {
+				printUsage(argv[0]);
+				return 1;
+			}
 		}
 	}
+	if(!renderer) {
+		renderer = createDefaultRenderer();
+	}
+
+#ifdef _WIN32
+	// Resolve an explicit -material against the launch directory BEFORE
+	// chdir'ing into the asset root, so both paths are independent.
+	if(materialSet) {
+		char full[MAX_PATH];
+		if(_fullpath(full, g_materialDir.c_str(), MAX_PATH)) {
+			g_materialDir = full;
+		}
+	}
+	if(!dataDir.empty() && !SetCurrentDirectoryA(dataDir.c_str())) {
+		std::fprintf(stderr, "Error: -datadir \"%s\" is not accessible\n", dataDir.c_str());
+		return 1;
+	}
+#endif
+	std::printf("Material package: %s\n", g_materialDir.c_str());
 
 	try {
 		Application().run(std::unique_ptr<RendererInterface>{ renderer });

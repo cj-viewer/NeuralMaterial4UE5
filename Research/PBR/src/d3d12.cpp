@@ -314,19 +314,20 @@ void Renderer::setup()
 	// Load PBR model assets.
 	m_pbrModel = createMeshBuffer(Mesh::fromFile("meshes/cerberus.fbx"));
 
-	// Classic material path: prefer the 1024^2 direct-BC1 mip chains (fair
-	// baseline against the neural latents, see m3_pbr_visual/make_classic_bc1.py);
-	// fall back to the original full-resolution PNGs when absent.
-	const bool haveClassicBC1 = std::ifstream("textures_bc1/albedo.dds").good()
-		&& std::ifstream("textures_bc1/normal.dds").good()
-		&& std::ifstream("textures_bc1/metalness.dds").good()
-		&& std::ifstream("textures_bc1/roughness.dds").good();
+	// Classic material path: prefer the material package's direct-BC1 mip
+	// chains (trainer output, encoded from the same source textures the neural
+	// model was trained on); fall back to the original PNGs when absent.
+	const std::string mat = g_materialDir + "/";
+	const bool haveClassicBC1 = std::ifstream(mat + "albedo.dds").good()
+		&& std::ifstream(mat + "normal.dds").good()
+		&& std::ifstream(mat + "metalness.dds").good()
+		&& std::ifstream(mat + "roughness.dds").good();
 	if(haveClassicBC1) {
-		m_albedoTexture = createTextureFromBC1DDS("textures_bc1/albedo.dds", true);
-		m_normalTexture = createTextureFromBC1DDS("textures_bc1/normal.dds");
-		m_metalnessTexture = createTextureFromBC1DDS("textures_bc1/metalness.dds");
-		m_roughnessTexture = createTextureFromBC1DDS("textures_bc1/roughness.dds");
-		std::printf("Classic maps: direct-BC1 1024^2 mip chains (textures_bc1/).\n");
+		m_albedoTexture = createTextureFromBC1DDS(mat + "albedo.dds", true);
+		m_normalTexture = createTextureFromBC1DDS(mat + "normal.dds");
+		m_metalnessTexture = createTextureFromBC1DDS(mat + "metalness.dds");
+		m_roughnessTexture = createTextureFromBC1DDS(mat + "roughness.dds");
+		std::printf("Classic maps: direct-BC1 mip chains from %s\n", g_materialDir.c_str());
 		std::fflush(stdout);
 	}
 	else {
@@ -1244,16 +1245,16 @@ Texture Renderer::createTextureFromBC1DDS(const std::string& filename, bool srgb
 
 void Renderer::loadNeuralMaterial()
 {
-	// Expects data/neural/{latent0..3.dds, weights.bin}; produced by
-	// Research/m3_pbr_visual/export_to_renderer.py. Optional: absence just
-	// leaves the classic texture path active.
+	// Expects {latent0..3.dds, weights.bin} in the material package folder
+	// (trainer output). Optional: absence just leaves the classic path active.
 	try {
+		const std::string mat = g_materialDir + "/";
 		for(int i = 0; i < 4; ++i) {
-			m_latentTextures[i] = createTextureFromBC1DDS("neural/latent" + std::to_string(i) + ".dds");
+			m_latentTextures[i] = createTextureFromBC1DDS(mat + "latent" + std::to_string(i) + ".dds");
 		}
-		std::ifstream file{"neural/weights.bin", std::ios::binary | std::ios::ate};
+		std::ifstream file{mat + "weights.bin", std::ios::binary | std::ios::ate};
 		if(!file.is_open()) {
-			throw std::runtime_error("Could not open neural/weights.bin");
+			throw std::runtime_error("Could not open " + mat + "weights.bin");
 		}
 		const std::streamsize size = file.tellg();
 		if(size != 716 * sizeof(float)) {
